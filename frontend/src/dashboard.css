@@ -553,3 +553,17 @@
   cursor: not-allowed;
   transform: none;
 }
+
+.bouncing-text {
+  display: inline-block;
+  animation: bounce-flower 2.0s ease-in-out infinite;
+}
+
+@keyframes bounce-flower {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}

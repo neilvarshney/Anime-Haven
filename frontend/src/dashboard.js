@@ -344,7 +344,7 @@ function Dashboard() {
                         onClick={toggleTray}
                         style={{ cursor: 'pointer' }}
                     />
-                    <h1>Anime Recommender Chatbot</h1>
+                    <h1><span className="bouncing-text">🌸 Anime Recommender Chatbot 🌸</span></h1>
                     <div className="user-info">
                         <span>Welcome, {user?.username}!</span>
                         <button onClick={handleLogout} className="logout-btn">Logout</button>
