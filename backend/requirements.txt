@@ -1,9 +1,8 @@
-fastapi
-uvicorn
-pydantic
-langchain
-langchain_community
-langchain-core
-langchain-groq
-groq
-python-dotenv
+fastapi>=0.104.1
+uvicorn>=0.24.0
+python-dotenv>=1.0.0
+groq>=0.4.2
+pydantic>=2.5.0
+python-multipart>=0.0.6
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0

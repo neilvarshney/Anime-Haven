@@ -1,28 +1,28 @@
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from groq import Groq
-import history
-from history import *
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-import datetime
+from pydantic import BaseModel, EmailStr
+from groq import Groq
 import time
+from datetime import datetime
 
-
+# Import our modules
+import database
+import auth
+from auth import get_current_user, get_password_hash, verify_password, create_access_token
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 
 if not GROQ_API_KEY:
     raise ValueError("API key for Groq is missing. Please set the GROQ_API_KEY in the .env file.")
 
+app = FastAPI(title="Anime Recommender Chatbot API", version="1.0.0")
 
-app = FastAPI()
-
-
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,37 +31,181 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
+# Initialize Groq client
 client = Groq(api_key=GROQ_API_KEY)
 
+# Pydantic models
+class UserRegister(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
 
-class UserInput(BaseModel):
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user_id: int
+    username: str
+
+class ChatMessage(BaseModel):
     message: str
-    role: str = "user"
-    conversation_id: str
+    conversation_id: Optional[int] = None
 
+class ConversationCreate(BaseModel):
+    title: str
 
-# Conversation class to store the conversation history using a dictionary.
-class Conversation:
-    def __init__(self):
-        self.messages: List[Dict[str, str]] = [
-            {"role": "system", "content": "You are a Anime Expert and will help the user find the best anime for them."}
-        ]
-        self.active: bool = True
+class ConversationUpdate(BaseModel):
+    title: str
 
-conversations: Dict[str, Conversation] = {}
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    database.initialize_database()
 
+# Authentication endpoints
+@app.post("/auth/register", response_model=Dict)
+async def register(user_data: UserRegister):
+    """Register a new user."""
+    # Check if username already exists
+    if database.get_user_by_username(user_data.username):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already registered"
+        )
+    
+    # Check if email already exists
+    if database.get_user_by_email(user_data.email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Hash password and create user
+    password_hash = get_password_hash(user_data.password)
+    user_id = database.create_user(user_data.username, user_data.email, password_hash)
+    
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user"
+        )
+    
+    return {"message": "User created successfully", "user_id": user_id}
 
+@app.post("/auth/login", response_model=Token)
+async def login(user_data: UserLogin):
+    """Login user and return JWT token."""
+    user = database.get_user_by_username(user_data.username)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password"
+        )
+    
+    if not verify_password(user_data.password, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password"
+        )
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": str(user["id"]), "username": user["username"]})
+    
+    return Token(
+        access_token=access_token,
+        token_type="bearer",
+        user_id=user["id"],
+        username=user["username"]
+    )
 
-# Makes a request to the Groq API. Expects a Conversation object as input so that it can use the conversation history.
-# Returns a string of the response from the API.
-def query_groq_api(conversation: Conversation) -> str:
+@app.get("/auth/me")
+async def get_current_user_info(current_user_id: int = Depends(get_current_user)):
+    """Get current user information."""
+    user = database.get_user_by_id(current_user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    return user
+
+# Conversation management endpoints
+@app.get("/conversations")
+async def get_conversations(current_user_id: int = Depends(get_current_user)):
+    """Get all conversations for the current user."""
+    conversations = database.get_user_conversations(current_user_id)
+    return {"conversations": conversations}
+
+@app.post("/conversations")
+async def create_conversation(
+    conversation_data: ConversationCreate,
+    current_user_id: int = Depends(get_current_user)
+):
+    """Create a new conversation."""
+    conversation_id = database.create_conversation(current_user_id, conversation_data.title)
+    if not conversation_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create conversation"
+        )
+    
+    return {"conversation_id": conversation_id, "title": conversation_data.title}
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: int,
+    current_user_id: int = Depends(get_current_user)
+):
+    """Get a specific conversation with all its messages."""
+    conversation = database.get_conversation_with_messages(conversation_id, current_user_id)
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
+    return conversation
+
+@app.put("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: int,
+    conversation_data: ConversationUpdate,
+    current_user_id: int = Depends(get_current_user)
+):
+    """Update conversation title."""
+    success = database.update_conversation_title(conversation_id, current_user_id, conversation_data.title)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
+    return {"message": "Conversation updated successfully"}
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    current_user_id: int = Depends(get_current_user)
+):
+    """Delete a conversation and all its messages."""
+    success = database.delete_conversation(conversation_id, current_user_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found"
+        )
+    return {"message": "Conversation deleted successfully"}
+
+# Chat functionality
+def query_groq_api(messages: List[Dict[str, str]]) -> str:
+    """Make a request to the Groq API."""
     try:
         start_time = time.time()
         
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=conversation.messages,
+            messages=messages,
             temperature=1,
             max_tokens=1024,
             top_p=1,
@@ -82,63 +226,66 @@ def query_groq_api(conversation: Conversation) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error with Groq API: {str(e)}")
 
-
-def get_or_create_conversation(conversation_id: str) -> Conversation:
-    if conversation_id not in conversations:
-        conversations[conversation_id] = Conversation()
-    return conversations[conversation_id]
-
-def history_db_Setup():
-    initialize_database()
-
-@app.get("/users/{user_id}")
-async def history(user_id: int):
-    user_data = history.get_user_by_id(user_id)
-    if user_data:
-        print(user_data)
-        return user_data
-    else: 
-        raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
-
-
-
-
-@app.post("/chat/")
-async def chat(input: UserInput):
-    conversation = get_or_create_conversation(input.conversation_id)
-
-    if not conversation.active:
-        raise HTTPException(
-            status_code=400, 
-            detail="The chat session has ended. Please start a new session."
-        )
-        
-    try:
-        # Append the user's message to the conversation
-        conversation.messages.append({
-            "role": input.role,
-            "content": input.message
-        })
-        
-        response = query_groq_api(conversation)
-        
-        conversation.messages.append({
-            "role": "assistant",
-            "content": response
-        })
-        
-        return {
-            "response": response,
-            "conversation_id": input.conversation_id
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/chat")
+async def chat(
+    chat_data: ChatMessage,
+    current_user_id: int = Depends(get_current_user)
+):
+    """Send a message and get AI response."""
+    conversation_id = chat_data.conversation_id
     
+    # If no conversation_id provided, create a new conversation
+    if not conversation_id:
+        # Create a new conversation with a default title
+        title = f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        conversation_id = database.create_conversation(current_user_id, title)
+        if not conversation_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create conversation"
+            )
+    else:
+        # Verify the conversation belongs to the user
+        conversation = database.get_conversation_by_id(conversation_id, current_user_id)
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found"
+            )
+    
+    # Get existing messages for this conversation
+    existing_messages = database.get_conversation_messages(conversation_id)
+    
+    # Prepare messages for Groq API (include system message)
+    api_messages = [
+        {"role": "system", "content": "You are a Anime Expert and will help the user find the best anime for them. Be enthusiastic about anime and provide detailed recommendations with explanations."}
+    ]
+    
+    # Add existing messages
+    for msg in existing_messages:
+        api_messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # Add the new user message
+    api_messages.append({"role": "user", "content": chat_data.message})
+    
+    # Get AI response
+    ai_response = query_groq_api(api_messages)
+    
+    # Save both messages to database
+    database.add_message(conversation_id, "user", chat_data.message)
+    database.add_message(conversation_id, "assistant", ai_response)
+    
+    return {
+        "response": ai_response,
+        "conversation_id": conversation_id
+    }
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
 if __name__ == "__main__":
     import uvicorn
-    history_db_Setup()
-    add_user("hi")
-    userJSON = get_user_by_id(1)
-    print(userJSON)
     uvicorn.run(app, host="0.0.0.0", port=8000)

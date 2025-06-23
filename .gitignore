@@ -39,7 +39,9 @@ yarn-error.log*
 *.swo
 .DS_Store
 
-# Database
+# Database (ignore all .db and .sqlite3 files in backend)
+backend/*.db
+backend/*.sqlite3
 *.db
 *.sqlite3
 
