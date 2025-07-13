@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { marked } from 'marked';
@@ -21,13 +21,8 @@ function Dashboard() {
     const messagesEndRef = useRef(null);
     const TYPING_SPEED = 20;
 
-    // Load conversations on component mount
-    useEffect(() => {
-        loadConversations();
-    }, []);
-
     // Load conversations from API
-    const loadConversations = async () => {
+    const loadConversations = useCallback(async () => {
         try {
             const response = await fetch('http://localhost:8000/conversations', {
                 headers: getAuthHeaders()
@@ -44,7 +39,12 @@ function Dashboard() {
         } finally {
             setIsLoadingConversations(false);
         }
-    };
+    }, [getAuthHeaders]);
+
+    // Load conversations on component mount
+    useEffect(() => {
+        loadConversations();
+    }, [loadConversations]);
 
     // Load a specific conversation
     const loadConversation = async (conversationId) => {
